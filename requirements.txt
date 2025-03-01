@@ -1,0 +1,6 @@
+ruff==0.9.6
+SQLAlchemy==2.0.38
+psycopg2==2.9.10
+ollama==0.4.7
+click==8.1.8
+simple-term-menu==1.6.6
