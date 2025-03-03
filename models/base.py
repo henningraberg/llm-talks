@@ -52,5 +52,12 @@ class BaseModel:
         for key, value in kwargs.items():
             if not hasattr(cls, key):
                 raise ValueError(f'{cls.__name__} does not have attribute {key}')
-            query = query.filter(getattr(cls, key) == value)
+
+            attr = getattr(cls, key)
+
+            if isinstance(value, list):  # Handle multiple values
+                query = query.filter(attr.in_(value))
+            else:  # Handle single values
+                query = query.filter(attr == value)
+
         return query.order_by(cls.created_at)
