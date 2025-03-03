@@ -1,8 +1,6 @@
-from typing import Optional
-
 import click
 
-from enums.enums import ChatRole
+from enums.enums import ChatRole, TextAlignment
 from models.chat import Chat
 from integrations.ollama_manager import OllamaManager
 from database.clean_db import clean_db
@@ -11,6 +9,10 @@ from simple_term_menu import TerminalMenu
 
 from models.chat_message import ChatMessage
 from models.conversation import Conversation
+
+from rich.text import Text
+from rich.console import Console
+from rich.live import Live
 
 
 @click.group()
@@ -30,14 +32,22 @@ def set_up_conversation() -> None:
         for i in range(1, 3):
             click.echo(f'Setting up LLM agent {i}')
             click.echo('Select a model:')
+
             terminal_menu = TerminalMenu([model.model for model in download_models.models])
             menu_entry_index = terminal_menu.show()
             model = download_models.models[menu_entry_index].model
+
             click.echo(f'Model: {model}')
+
             new_chat = Chat(default_model=model).save()
             chats.append(new_chat)
+
             system_message = click.prompt('Enter initial system message', type=str)
             ChatMessage(chat_id=new_chat.id, role=ChatRole.SYSTEM, content=system_message).save()
+
+            # To get the models to start talking they both need to have empty user messages to start with.
+            ChatMessage(chat_id=new_chat.id, role=ChatRole.USER, content='').save()
+
             click.echo('\n')
 
         conv = Conversation(agent_1_chat_id=chats[0].id, agent_2_chat_id=chats[1].id).save()
@@ -48,65 +58,104 @@ def set_up_conversation() -> None:
 
 @click.command()
 @click.option('--conv_id', type=str, help='Conversation ID')
-def run_conversation(conv_id: int) -> None:
-    """Run the given conversation."""
-    conversation = Conversation.get_one(id=conv_id)
-
-    keep_conversing = True
-    agent_chats = [conversation.agent_1_chat, conversation.agent_2_chat]
-
-    while keep_conversing:
-        for x in OllamaManager.chat(sender_agent_chat=agent_chats[0], responder_agent_chat=agent_chats[1]):
-            click.echo(x, nl=False)
-
-        agent_chats[0], agent_chats[1] = agent_chats[1], agent_chats[0]
-        click.prompt('Press enter to continue')
-
-
-@click.command()
-@click.option('--chat_id', type=int, help='ID of chat')
-def list_chat_history(chat_id: int):
-    """List a chats message history."""
+def show_conversation(conv_id: int) -> None:
     try:
-        chat = Chat.get_one(id=chat_id)
-        message_history = chat.get_chat_history()
+        console = Console()
+        conv = Conversation.get_one(id=conv_id)
 
-        for message in message_history:
-            actor = message.model if message.model else 'You'
-            click.echo(actor)
-            click.echo('-' * len(actor))
-            click.echo(message.content + '\n\n')
+        for message in conv.merged_chat_history:
+            chat_bubble = conv.generate_chat_bubble(message)
+            console.print(
+                chat_bubble,
+                justify=chat_bubble.renderable.title_align,
+            )
     except Exception as e:
         click.echo(f'❌ {e}')
+        return
 
 
 @click.command()
-@click.option('--content', type=str, help='Message to send to the LLM.')
-@click.option('--chat_id', type=int, help='ID of chat.')
-@click.option('--model', type=str, help='Name of model that will answer.')
+@click.option('--conv_id', type=str, help='Conversation ID')
+@click.option(
+    '--interactive', default=True, type=bool, help='Run the conversation interactively by adding system messages.'
+)
 @click.pass_context
-def chat(ctx, chat_id: int, content: str, model: Optional[str] = None):
-    """List a chats message history."""
+def run_conversation(ctx, conv_id: int, interactive: bool) -> None:
+    """Run the given conversation."""
     try:
-        manager = OllamaManager()
+        conversation = Conversation.get_one(id=conv_id)
 
-        ctx.invoke(list_chat_history, chat_id=chat_id)
+        keep_conversing = True
 
-        chat = Chat.get_one(id=chat_id)
+        ctx.invoke(show_conversation, conv_id=conv_id)
 
-        click.echo('You\n---')
-        click.echo(content + '\n\n')
+        messages = ChatMessage.get_multiple(
+            chat_id=[conversation.agent_1_chat.id, conversation.agent_2_chat.id], role=ChatRole.ASSISTANT
+        )
 
-        if not model:
-            click.echo(chat.default_model + '\n' + '-' * len(chat.default_model))
-        else:
-            click.echo(model + '\n' + '-' * len(model))
+        # Figure out whos turn it is to answer.
+        context = {'sender': conversation.agent_1_chat, 'responder': conversation.agent_2_chat}
 
-        for x in manager.chat(chat_id=chat_id, content=content, model=model):
-            click.echo(x, nl=False)
-        click.echo('\n\n')
+        if messages:
+            last_message = messages[-1]
+            if last_message.chat_id == conversation.agent_2_chat.id:
+                context = {'sender': conversation.agent_2_chat, 'responder': conversation.agent_1_chat}
+
+        while keep_conversing:
+            with Live(refresh_per_second=5) as live:
+                chat_bubble = conversation.generate_empty_chat_bubble(context['sender'])
+                live.update(chat_bubble)
+                response = ''
+                for x in OllamaManager.chat(
+                    sender_agent_chat=context['sender'], responder_agent_chat=context['responder']
+                ):
+                    response += x
+                    new_text = Text(response, justify=TextAlignment.LEFT.value)
+                    chat_bubble.renderable.renderable = new_text
+                    live.update(chat_bubble)
+
+            context['sender'], context['responder'] = context['responder'], context['sender']
+
+            if interactive:
+                run_interactive_prompt(conversation)
     except Exception as e:
         click.echo(f'❌ {e}')
+        return
+
+
+def run_interactive_prompt(conversation: Conversation) -> None:
+    options = [
+        'Continue',
+        'Add system message to agent 1 (right side)',
+        'Add system message to agent 2 (left side)',
+        'Abort',
+    ]
+    terminal_menu = TerminalMenu(options)
+    option = None
+    console = Console()
+    while option != options[0]:
+        menu_entry_index = terminal_menu.show()
+        option = options[menu_entry_index]
+        chat_message = None
+        if option == options[3]:
+            exit()
+        elif option == options[1]:
+            system_message = click.prompt('Enter system message for agent 1 (right side)', type=str)
+            chat_message = ChatMessage(
+                chat_id=conversation.agent_1_chat.id, role=ChatRole.SYSTEM, content=system_message
+            ).save()
+        elif option == options[2]:
+            system_message = click.prompt('Enter system message for agent 2 (left side)', type=str)
+            chat_message = ChatMessage(
+                chat_id=conversation.agent_2_chat.id, role=ChatRole.SYSTEM, content=system_message
+            ).save()
+
+        if chat_message:
+            chat_bubble = conversation.generate_chat_bubble(chat_message)
+            console.print(
+                chat_bubble,
+                justify=chat_bubble.renderable.title_align,
+            )
 
 
 @click.command()
@@ -160,6 +209,34 @@ def remove_model(model: str):
 
 
 @click.command()
+@click.option(
+    '--conv_id',
+    type=int,
+    help='ID of the conversation you want to delete.',
+)
+def remove_conversation(conv_id: int):
+    """Remove conversation."""
+    try:
+        conversation = Conversation.get_one(id=conv_id)
+        conversation.delete()
+    except Exception as e:
+        click.echo(f'❌ {e}')
+        return
+
+
+@click.command()
+def list_conversations():
+    """List conversations."""
+    try:
+        conversations = Conversation.get_multiple()
+        for conv in conversations:
+            click.echo(conv.to_dict())
+    except Exception as e:
+        click.echo(f'❌ {e}')
+        return
+
+
+@click.command()
 def list_models():
     """List all downloaded models."""
     try:
@@ -202,9 +279,6 @@ def build_db():
 
 
 # Add commands to the main CLI group
-cli.add_command(list_chat_history)
-cli.add_command(chat)
-
 cli.add_command(download_model)
 cli.add_command(list_models)
 cli.add_command(remove_model)
@@ -212,6 +286,9 @@ cli.add_command(show_model)
 
 cli.add_command(set_up_conversation)
 cli.add_command(run_conversation)
+cli.add_command(show_conversation)
+cli.add_command(remove_conversation)
+cli.add_command(list_conversations)
 
 cli.add_command(nuke_db)
 cli.add_command(build_db)
