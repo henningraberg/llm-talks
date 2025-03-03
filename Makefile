@@ -1,7 +1,6 @@
 install:
 	python -m venv venv
-	. venv/bin/activate
-	pip install -r requirements.txt
+	bash -c "source venv/bin/activate && pip install -r requirements.txt"
 	docker-compose up -d
 	python llm-talks.py build-db
 
@@ -11,5 +10,5 @@ rebuild-db:
 
 clean:
 	docker-compose down -v
+	source deactivate
 	rm -rf venv
-	deactivate

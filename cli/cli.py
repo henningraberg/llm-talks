@@ -59,6 +59,7 @@ def set_up_conversation() -> None:
 @click.command()
 @click.option('--conv_id', type=str, help='Conversation ID')
 def show_conversation(conv_id: int) -> None:
+    """Prints the given conversation."""
     try:
         console = Console()
         conv = Conversation.get_one(id=conv_id)

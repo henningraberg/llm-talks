@@ -25,4 +25,4 @@ services:
 
 volumes:
   ollama:
-  postgres_data:
+  llm_talks_postgres_data:
