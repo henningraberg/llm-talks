@@ -3,11 +3,11 @@ install:
 	. venv/bin/activate
 	pip install -r requirements.txt
 	docker-compose up -d
-	python liab.py build-db
+	python llm-talks.py build-db
 
 rebuild-db:
-	python liab.py nuke-db
-	python liab.py build-db
+	python llm-talks.py nuke-db
+	python llm-talks.py build-db
 
 clean:
 	docker-compose down -v
